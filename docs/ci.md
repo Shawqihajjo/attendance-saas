@@ -7,8 +7,12 @@ GitHub Actions workflows:
 | CI | `.github/workflows/ci.yml` | Lint, test, and validate production Docker builds (no push) |
 | Release images | `.github/workflows/release-images.yml` | Publish production images to GHCR after CI succeeds |
 | Deploy | `.github/workflows/deploy.yml` | Staging/production CD over SSH (disabled until host vars exist) |
+| Monitor | `.github/workflows/monitor.yml` | Read-only CI triage, scheduled safe checks, optional probes, email reports (**no remediation**) |
+| Remediation | `.github/workflows/remediation.yml` | Approval-gated branch + draft PR for a specific Finding ID (never auto-merge/deploy) |
 
-Continuous deployment details, required secret **names**, migration order, and rollback: [ci-cd-deployment.md](ci-cd-deployment.md).
+Monitor setup: [monitoring.md](monitoring.md).  
+Remediation approval: [monitoring-remediation.md](monitoring-remediation.md).  
+Continuous deployment details: [ci-cd-deployment.md](ci-cd-deployment.md).
 
 ## CI triggers
 

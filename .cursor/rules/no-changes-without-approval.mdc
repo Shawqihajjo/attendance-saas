@@ -1,0 +1,122 @@
+---
+
+description: Mandatory approval before modifying application code, configuration, databases, infrastructure, or deployments.
+alwaysApply: true
+-----------------
+
+# Mandatory Change-Control Policy
+
+## 1. User Approval Is Required
+
+This project must follow a strict review-before-change workflow.
+
+You may inspect the codebase, analyze architecture, run approved non-destructive diagnostics, execute safe tests, investigate failures, and prepare reports.
+
+**You MUST NOT implement, apply, or execute any proposed fix until I explicitly approve the specific change.**
+
+## 2. Prohibited Actions Without Approval
+
+Do not independently:
+
+* Create, edit, delete, or refactor application source code.
+* Modify React components, Redux state logic, or styling.
+* Change Symfony services, controllers, entities, APIs, or business logic.
+* Change authentication, authorization, or tenant isolation.
+* Install, remove, or upgrade dependencies.
+* Modify environment configuration, secrets, or credentials.
+* Modify database schemas or execute database migrations.
+* Insert, update, or delete application database records.
+* Change tenant settings, quotas, or attendance records.
+* Modify Docker, Nginx, infrastructure, or production configuration.
+* Restart, stop, or reconfigure production services.
+* Commit, push, merge, or rewrite Git history.
+* Deploy, roll back, or release the application.
+* Automatically apply suggestions from tests, linters, security scanners, or AI reviews.
+
+Do not interpret a failed test or security finding as permission to fix it.
+
+## 3. Required Workflow for Every Problem
+
+When you discover a bug, failed test, security issue, performance problem, or CI/CD failure:
+
+1. Investigate the problem without changing application behavior.
+2. Gather evidence and reproduce the issue when safe.
+3. Identify the root cause where the evidence supports it.
+4. Explain the impact and severity.
+5. Recommend a specific fix.
+6. Identify the files, modules, APIs, databases, or infrastructure that would be affected.
+7. Explain potential side effects and regression tests.
+8. Prepare a report and notify me through the configured notification mechanism.
+9. STOP and wait for my explicit approval.
+
+When email notifications are configured, send me a report containing the finding ID, severity, evidence, root cause, proposed solution, test results, and relevant links.
+
+Do not claim that an email has been sent unless the configured email service confirms success.
+
+## 4. Approval Rules
+
+Approval must identify the specific finding or proposed change being authorized.
+
+Valid approval must come directly from me through the agreed approval mechanism.
+
+The following are NOT approval:
+
+* Silence or lack of response.
+* A failed CI/CD workflow.
+* A successful diagnostic run.
+* A recommendation made by the AI agent.
+* An email being delivered or opened.
+* Approval of a different finding.
+* A previous approval for unrelated work.
+
+If approval is missing, ambiguous, or outside the approved scope, do not make changes.
+
+If the implementation requires additional changes, ask for further approval before proceeding.
+
+## 5. Rules After Approval
+
+Once I explicitly approve a specific fix:
+
+1. Implement only the approved scope.
+2. Preserve unrelated and uncommitted changes.
+3. Work on an isolated Git branch when appropriate.
+4. Add or update relevant regression tests.
+5. Run the applicable backend, frontend, security, and build checks.
+6. Report all files changed and actual test results.
+7. Present the completed changes for my review.
+
+If tests fail or the issue requires broader changes, stop and report the problem.
+
+Approval to fix an issue does not authorize merging or deploying the application.
+
+Production changes and deployments require separate explicit approval.
+
+## 6. Database and Production Safety
+
+Never run destructive tests against production.
+
+Never execute production migrations, destructive SQL, tenant deletion, or data modification without explicit approval.
+
+Use isolated test databases and synthetic data for integration tests.
+
+Never expose employee personal information, photographs, biometric data, credentials, access tokens, or private keys in diagnostic reports or emails.
+
+Use read-only credentials for production monitoring wherever possible.
+
+## 7. CI/CD and Monitoring
+
+CI/CD jobs may run approved automated tests and build validation according to the established pipeline.
+
+Monitoring agents may inspect health results, logs, and test outcomes using authorized access.
+
+A failing check must be reported honestly.
+
+Do not bypass required checks, hide errors, weaken security policies, or report unexecuted tests as successful.
+
+No monitoring or remediation agent may automatically modify application code or deploy a fix.
+
+## 8. Final Requirement
+
+**REPORT → RECOMMEND → WAIT FOR MY APPROVAL → IMPLEMENT ONLY THE APPROVED CHANGE.**
+
+When uncertain whether an operation changes application behavior, data, configuration, infrastructure, or deployment state, stop and ask for approval first.

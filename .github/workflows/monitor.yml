@@ -1,0 +1,522 @@
+# Read-only CI/CD and system health monitor.
+# Diagnoses and reports only. Never remediates, deploys, migrates, or edits application code.
+#
+# Triggers:
+#   - workflow_run after CI completes (triage + email on failure; record success)
+#   - schedule: every 12h probe/status; weekly Monday 08:00 UTC safe test suite
+#   - workflow_dispatch
+#
+# Pull requests do not run this workflow directly (no secrets on untrusted PR code).
+
+name: Monitor
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  schedule:
+    # Lightweight probe / status every 12 hours (UTC)
+    - cron: "0 */12 * * *"
+    # Weekly full safe checks Monday 08:00 UTC
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Monitor mode
+        required: true
+        type: choice
+        default: full
+        options:
+          - full
+          - triage
+          - probe
+
+concurrency:
+  group: monitor-${{ github.event.workflow_run.id || github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+  checks: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Triage latest CI run (workflow_run or manual triage)
+  # ---------------------------------------------------------------------------
+  triage-ci:
+    name: Triage CI results
+    runs-on: ubuntu-24.04
+    if: >
+      github.event_name == 'workflow_run' ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'triage')
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      issues: write
+    outputs:
+      report_path: ${{ steps.meta.outputs.report_path }}
+      need_email: ${{ steps.meta.outputs.need_email }}
+      subject: ${{ steps.meta.outputs.subject }}
+      sha: ${{ steps.meta.outputs.sha }}
+      branch: ${{ steps.meta.outputs.branch }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Collect CI job conclusions
+        id: ci
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x .github/scripts/monitor/*.sh
+
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            RUN_ID="${{ github.event.workflow_run.id }}"
+            SHA="${{ github.event.workflow_run.head_sha }}"
+            BRANCH="${{ github.event.workflow_run.head_branch }}"
+            EVENT="${{ github.event.workflow_run.event }}"
+            CONCLUSION="${{ github.event.workflow_run.conclusion }}"
+            HTML_URL="${{ github.event.workflow_run.html_url }}"
+          else
+            # Manual triage: latest CI run on default branch
+            RUN_ID="$(gh api "/repos/${{ github.repository }}/actions/workflows/ci.yml/runs?branch=${{ github.event.repository.default_branch }}&per_page=1" --jq '.workflow_runs[0].id')"
+            META="$(gh api "/repos/${{ github.repository }}/actions/runs/${RUN_ID}")"
+            SHA="$(printf '%s' "$META" | jq -r .head_sha)"
+            BRANCH="$(printf '%s' "$META" | jq -r .head_branch)"
+            EVENT="$(printf '%s' "$META" | jq -r .event)"
+            CONCLUSION="$(printf '%s' "$META" | jq -r .conclusion)"
+            HTML_URL="$(printf '%s' "$META" | jq -r .html_url)"
+          fi
+
+          {
+            echo "run_id=${RUN_ID}"
+            echo "sha=${SHA}"
+            echo "branch=${BRANCH}"
+            echo "event=${EVENT}"
+            echo "conclusion=${CONCLUSION}"
+            echo "html_url=${HTML_URL}"
+          } >> "$GITHUB_OUTPUT"
+
+          JOBS_JSON="$(gh api "/repos/${{ github.repository }}/actions/runs/${RUN_ID}/jobs?per_page=50")"
+          CHECK_LINES=""
+          FAILED=0
+          while IFS= read -r row; do
+            [ -z "$row" ] && continue
+            name="$(printf '%s' "$row" | cut -d'|' -f1)"
+            conclusion="$(printf '%s' "$row" | cut -d'|' -f2)"
+            case "$conclusion" in
+              success) status=PASS; severity=info ;;
+              failure|timed_out) status=FAIL; severity=high; FAILED=1 ;;
+              cancelled) status=PARTIAL; severity=medium ;;
+              skipped) status=NOT TESTED; severity=info ;;
+              *) status=PARTIAL; severity=low ;;
+            esac
+            evidence="CI job conclusion=${conclusion} (run ${RUN_ID})"
+            CHECK_LINES="${CHECK_LINES}${name}|${status}|${severity}|${evidence}"$'\n'
+          done < <(printf '%s' "$JOBS_JSON" | jq -r '.jobs[] | "\(.name)|\(.conclusion // "unknown")"')
+
+          # Overall CI
+          case "$CONCLUSION" in
+            success) overall=PASS; osev=info ;;
+            failure) overall=FAIL; osev=critical; FAILED=1 ;;
+            *) overall=PARTIAL; osev=medium ;;
+          esac
+          CHECK_LINES="CI workflow|${overall}|${osev}|event=${EVENT} conclusion=${CONCLUSION}"$'\n'"${CHECK_LINES}"
+
+          # Trust note for PR-triggered CI
+          if [ "$EVENT" = "pull_request" ]; then
+            CHECK_LINES="${CHECK_LINES}PR CI context|PARTIAL|info|CI was a pull_request run; secrets were not used by Monitor for PR code execution"$'\n'
+          fi
+
+          {
+            echo "failed=${FAILED}"
+            echo "check_lines<<EOF"
+            printf '%s' "$CHECK_LINES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build report and findings
+        id: meta
+        env:
+          CHECK_LINES: ${{ steps.ci.outputs.check_lines }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MONITOR_CREATE_ISSUES: ${{ vars.MONITOR_CREATE_ISSUES }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x .github/scripts/monitor/*.sh
+          STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+          REPORT="monitor-reports/ci-triage-${STAMP}.md"
+          NOTE="$(printf '%s\n' "$CHECK_LINES" | .github/scripts/monitor/redact.sh | head -c 8000)"
+          export REPORT_PATH="$REPORT"
+          export REPO="${{ github.repository }}"
+          export BRANCH="${{ steps.ci.outputs.branch }}"
+          export SHA="${{ steps.ci.outputs.sha }}"
+          export RUN_URL="${{ steps.ci.outputs.html_url }}"
+          export MONITOR_RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          export TRIGGER="workflow_run_or_triage"
+          export GENERATED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          export SUMMARY_NOTE="CI triage for run ${{ steps.ci.outputs.run_id }}. Redacted job summary follows:"$'\n\n'"${NOTE}"
+          .github/scripts/monitor/build-report.sh
+
+          export FINDINGS_DIR="findings-out"
+          export CHECK_LINES
+          .github/scripts/monitor/emit-findings.sh
+          if [ -f findings-out/email-section.md ] && [ -s findings-out/email-section.md ]; then
+            {
+              echo
+              echo "## Findings requiring approval"
+              echo
+              cat findings-out/email-section.md
+            } >> "$REPORT"
+          fi
+
+          if [ "${MONITOR_CREATE_ISSUES}" != "false" ] && [ -f findings-out/ids.txt ] && [ -s findings-out/ids.txt ]; then
+            GITHUB_REPOSITORY="${{ github.repository }}" FINDINGS_DIR=findings-out \
+              .github/scripts/monitor/create-finding-issues.sh || echo "Issue creation failed (non-fatal for report)"
+          fi
+
+          NEED_EMAIL=false
+          SUBJECT="[PASS] Attendance SaaS CI monitor"
+          if [ "${{ steps.ci.outputs.failed }}" = "1" ] || [ "${{ steps.ci.outputs.conclusion }}" = "failure" ]; then
+            NEED_EMAIL=true
+            SUBJECT="[FAIL] Attendance SaaS CI — ${{ steps.ci.outputs.branch }} @ ${{ steps.ci.outputs.sha }}"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            NEED_EMAIL=true
+            SUBJECT="[TRIAGE] Attendance SaaS CI — ${{ steps.ci.outputs.branch }}"
+          fi
+
+          {
+            echo "report_path=${REPORT}"
+            echo "need_email=${NEED_EMAIL}"
+            echo "subject=${SUBJECT}"
+            echo "sha=${{ steps.ci.outputs.sha }}"
+            echo "branch=${{ steps.ci.outputs.branch }}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload report artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: monitor-ci-triage-${{ github.run_id }}
+          path: |
+            ${{ steps.meta.outputs.report_path }}
+            findings-out/
+          if-no-files-found: error
+
+      - name: Write job summary
+        run: cat "${{ steps.meta.outputs.report_path }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Email on configured failures / triage
+        if: steps.meta.outputs.need_email == 'true'
+        env:
+          MONITOR_EMAIL_ENABLED: ${{ vars.MONITOR_EMAIL_ENABLED }}
+          MONITOR_EMAIL_TO: ${{ vars.MONITOR_EMAIL_TO }}
+          MONITOR_EMAIL_FROM: ${{ vars.MONITOR_EMAIL_FROM }}
+          MONITOR_RESEND_API_KEY: ${{ secrets.MONITOR_RESEND_API_KEY }}
+          MONITOR_SMTP_HOST: ${{ secrets.MONITOR_SMTP_HOST }}
+          MONITOR_SMTP_PORT: ${{ secrets.MONITOR_SMTP_PORT }}
+          MONITOR_SMTP_USER: ${{ secrets.MONITOR_SMTP_USER }}
+          MONITOR_SMTP_PASSWORD: ${{ secrets.MONITOR_SMTP_PASSWORD }}
+          SUBJECT: ${{ steps.meta.outputs.subject }}
+          BODY_FILE: ${{ steps.meta.outputs.report_path }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MONITOR_EMAIL_ENABLED}" ]; then MONITOR_EMAIL_ENABLED=true; fi
+          .github/scripts/monitor/send-email.sh | tee /tmp/email-status.txt
+          if grep -q 'EMAIL_STATUS=FAIL' /tmp/email-status.txt; then exit 1; fi
+
+  # ---------------------------------------------------------------------------
+  # Scheduled / manual probe of configured health URL (read-only HTTP)
+  # ---------------------------------------------------------------------------
+  probe:
+    name: Health probe
+    runs-on: ubuntu-24.04
+    if: >
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && (inputs.mode == 'probe' || inputs.mode == 'full'))
+    outputs:
+      report_path: ${{ steps.report.outputs.report_path }}
+      need_email: ${{ steps.report.outputs.need_email }}
+      subject: ${{ steps.report.outputs.subject }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Probe configured URL
+        id: probe
+        env:
+          MONITOR_PROBE_URL: ${{ vars.MONITOR_PROBE_URL }}
+          MONITOR_PROBE_TOKEN: ${{ secrets.MONITOR_PROBE_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x .github/scripts/monitor/*.sh
+          CHECK_LINES=""
+          FAILED=0
+          if [ -z "${MONITOR_PROBE_URL}" ]; then
+            CHECK_LINES="Liveness GET /api/v1/health|BLOCKED|medium|MONITOR_PROBE_URL unset"$'\n'
+            CHECK_LINES="${CHECK_LINES}Readiness GET /api/v1/health/ready|BLOCKED|medium|MONITOR_PROBE_URL unset"$'\n'
+            echo "failed=0" >> "$GITHUB_OUTPUT"
+            echo "blocked=1" >> "$GITHUB_OUTPUT"
+          else
+            BASE="${MONITOR_PROBE_URL%/}"
+            AUTH=()
+            if [ -n "${MONITOR_PROBE_TOKEN}" ]; then
+              AUTH=(-H "Authorization: Bearer ${MONITOR_PROBE_TOKEN}")
+            fi
+            for path in /api/v1/health /api/v1/health/ready; do
+              CODE="$(curl -sS -o /tmp/probe-body.txt -w '%{http_code}' --max-time 20 "${AUTH[@]}" "${BASE}${path}" || echo 000)"
+              BODY="$(head -c 400 /tmp/probe-body.txt | tr '\n' ' ' | .github/scripts/monitor/redact.sh || true)"
+              name="HTTP ${path}"
+              if [ "$CODE" = "200" ]; then
+                CHECK_LINES="${CHECK_LINES}${name}|PASS|info|http=${CODE} body=${BODY}"$'\n'
+              else
+                CHECK_LINES="${CHECK_LINES}${name}|FAIL|high|http=${CODE} body=${BODY}"$'\n'
+                FAILED=1
+              fi
+            done
+            echo "failed=${FAILED}" >> "$GITHUB_OUTPUT"
+            echo "blocked=0" >> "$GITHUB_OUTPUT"
+          fi
+          {
+            echo "check_lines<<EOF"
+            printf '%s' "$CHECK_LINES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build probe report
+        id: report
+        env:
+          CHECK_LINES: ${{ steps.probe.outputs.check_lines }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+          REPORT="monitor-reports/probe-${STAMP}.md"
+          export REPORT_PATH="$REPORT" REPO="${{ github.repository }}"
+          export BRANCH="${{ github.ref_name }}" SHA="${{ github.sha }}"
+          export RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          export TRIGGER="schedule_or_probe" GENERATED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          export SUMMARY_NOTE="Read-only HTTP probes only. No database writes. No remediation."
+          export CHECK_LINES
+          .github/scripts/monitor/build-report.sh
+          NEED_EMAIL=false
+          SUBJECT="[PROBE] Attendance SaaS health"
+          if [ "${{ steps.probe.outputs.failed }}" = "1" ]; then
+            NEED_EMAIL=true
+            SUBJECT="[FAIL] Attendance SaaS health probe"
+          elif [ "${{ steps.probe.outputs.blocked }}" = "1" ] && [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            NEED_EMAIL=true
+            SUBJECT="[BLOCKED] Attendance SaaS health probe (no MONITOR_PROBE_URL)"
+          fi
+          # Periodic schedule: email weekly digest path handled elsewhere; for 12h probe email only on FAIL
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ steps.probe.outputs.failed }}" != "1" ]; then
+            NEED_EMAIL=false
+          fi
+          echo "report_path=${REPORT}" >> "$GITHUB_OUTPUT"
+          echo "need_email=${NEED_EMAIL}" >> "$GITHUB_OUTPUT"
+          echo "subject=${SUBJECT}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload probe artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: monitor-probe-${{ github.run_id }}
+          path: ${{ steps.report.outputs.report_path }}
+
+      - name: Email probe result
+        if: steps.report.outputs.need_email == 'true'
+        env:
+          MONITOR_EMAIL_ENABLED: ${{ vars.MONITOR_EMAIL_ENABLED }}
+          MONITOR_EMAIL_TO: ${{ vars.MONITOR_EMAIL_TO }}
+          MONITOR_EMAIL_FROM: ${{ vars.MONITOR_EMAIL_FROM }}
+          MONITOR_RESEND_API_KEY: ${{ secrets.MONITOR_RESEND_API_KEY }}
+          MONITOR_SMTP_HOST: ${{ secrets.MONITOR_SMTP_HOST }}
+          MONITOR_SMTP_PORT: ${{ secrets.MONITOR_SMTP_PORT }}
+          MONITOR_SMTP_USER: ${{ secrets.MONITOR_SMTP_USER }}
+          MONITOR_SMTP_PASSWORD: ${{ secrets.MONITOR_SMTP_PASSWORD }}
+          SUBJECT: ${{ steps.report.outputs.subject }}
+          BODY_FILE: ${{ steps.report.outputs.report_path }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          chmod +x .github/scripts/monitor/*.sh
+          if [ -z "${MONITOR_EMAIL_ENABLED}" ]; then MONITOR_EMAIL_ENABLED=true; fi
+          .github/scripts/monitor/send-email.sh | tee /tmp/email-status.txt
+          if grep -q 'EMAIL_STATUS=FAIL' /tmp/email-status.txt; then exit 1; fi
+
+  # ---------------------------------------------------------------------------
+  # Weekly / manual full safe checks (isolated CI-equivalent; no prod data)
+  # ---------------------------------------------------------------------------
+  scheduled-backend:
+    name: Scheduled Backend
+    runs-on: ubuntu-24.04
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '0 8 * * 1') ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'full')
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: shivammathur/setup-php@bf6b4fbd49ca58e4608c9c89fba0b8d90bd2a39f # 2.35.5
+        with:
+          php-version: "8.4"
+          extensions: mbstring, intl, pdo_sqlite, sqlite3, zip, sodium
+          coverage: none
+          tools: composer:v2
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: backend/vendor
+          key: composer-${{ runner.os }}-php8.4-${{ hashFiles('backend/composer.lock') }}
+          restore-keys: |
+            composer-${{ runner.os }}-php8.4-
+      - run: composer validate --no-check-publish --strict
+      - run: composer install --prefer-dist --no-interaction --no-progress --no-scripts
+      - run: composer dump-autoload --no-interaction
+      - run: find src tests -name '*.php' -print0 | xargs -0 -n1 php -l
+      - run: composer audit --locked --no-interaction
+      - run: cp .env.test .env
+      - run: php vendor/bin/phpunit
+      - run: php bin/console cache:warmup --env=test --no-interaction
+      - run: php vendor/bin/phpstan analyse --memory-limit=512M --no-progress
+
+  scheduled-frontend:
+    name: Scheduled Frontend
+    runs-on: ubuntu-24.04
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '0 8 * * 1') ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'full')
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npx tsc -b --pretty false
+      - run: npm run build
+      - run: npm audit --audit-level=high
+
+  scheduled-docker:
+    name: Scheduled Docker
+    runs-on: ubuntu-24.04
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '0 8 * * 1') ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'full')
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Validate production Compose file
+        env:
+          APP_SECRET: ci-placeholder-app-secret-value-32c
+          APP_ENV: prod
+          APP_DEBUG: "0"
+          DEFAULT_URI: https://ci.example
+          PLATFORM_HOSTNAME: ci.example
+          MYSQL_ROOT_PASSWORD: ci-root-password
+          MYSQL_DATABASE: platform
+          MYSQL_USER: ci_user
+          MYSQL_PASSWORD: ci-mysql-password
+          REDIS_PASSWORD: ci-redis-password
+          RABBITMQ_USER: ci_rabbit
+          RABBITMQ_PASSWORD: ci-rabbit-password
+          TENANT_DB_CREDENTIALS_KEY: Y2ktcGxhY2Vob2xkZXItdGVuYW50LWtleS0zMmJ5dGVzIQ==
+          TENANT_DB_CREDENTIALS_KEY_ID: ci
+        run: docker compose -f docker-compose.prod.yml config --quiet
+      - run: docker build -f docker/php/Dockerfile.prod -t attendance-php:monitor .
+      - run: docker build -f docker/nginx/Dockerfile -t attendance-nginx:monitor .
+
+  scheduled-summary:
+    name: Scheduled summary report
+    needs: [scheduled-backend, scheduled-frontend, scheduled-docker]
+    if: >
+      always() &&
+      (
+        (github.event_name == 'schedule' && github.event.schedule == '0 8 * * 1') ||
+        (github.event_name == 'workflow_dispatch' && inputs.mode == 'full')
+      )
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Build weekly/full report
+        id: report
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x .github/scripts/monitor/*.sh
+          STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+          REPORT="monitor-reports/full-${STAMP}.md"
+          be="${{ needs.scheduled-backend.result }}"
+          fe="${{ needs.scheduled-frontend.result }}"
+          dk="${{ needs.scheduled-docker.result }}"
+          FAILED=0
+          for r in "$be" "$fe" "$dk"; do
+            case "$r" in failure|cancelled|timed_out) FAILED=1 ;; esac
+          done
+          status_line() {
+            name="$1"; result="$2"
+            case "$result" in
+              success) echo "${name}|PASS|info|scheduled job succeeded" ;;
+              failure|cancelled|timed_out) echo "${name}|FAIL|high|scheduled job result=${result}" ;;
+              skipped) echo "${name}|NOT TESTED|info|job skipped" ;;
+              *) echo "${name}|PARTIAL|medium|result=${result}" ;;
+            esac
+          }
+          CHECK_LINES="$(status_line "Scheduled Backend" "$be")"$'\n'
+          CHECK_LINES="${CHECK_LINES}$(status_line "Scheduled Frontend" "$fe")"$'\n'
+          CHECK_LINES="${CHECK_LINES}$(status_line "Scheduled Docker" "$dk")"$'\n'
+          CHECK_LINES="${CHECK_LINES}Live staging probe|NOT TESTED|info|See Health probe job when MONITOR_PROBE_URL is set"$'\n'
+          CHECK_LINES="${CHECK_LINES}Automatic remediation|NOT TESTED|info|Disabled by design — read-only monitor"$'\n'
+
+          export REPORT_PATH="$REPORT" REPO="${{ github.repository }}"
+          export BRANCH="${{ github.ref_name }}" SHA="${{ github.sha }}"
+          export RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          export TRIGGER="weekly_or_full" GENERATED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          export CHECK_LINES
+          export SUMMARY_NOTE="Isolated SQLite/npm/Docker checks only. No production database access. No remediation."
+          .github/scripts/monitor/build-report.sh
+
+          SUBJECT="[SUMMARY] Attendance SaaS weekly/full monitor"
+          if [ "$FAILED" = "1" ]; then
+            SUBJECT="[FAIL] Attendance SaaS weekly/full monitor"
+          fi
+          echo "report_path=${REPORT}" >> "$GITHUB_OUTPUT"
+          echo "subject=${SUBJECT}" >> "$GITHUB_OUTPUT"
+          echo "failed=${FAILED}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: monitor-full-${{ github.run_id }}
+          path: ${{ steps.report.outputs.report_path }}
+
+      - run: cat "${{ steps.report.outputs.report_path }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Email summary
+        env:
+          MONITOR_EMAIL_ENABLED: ${{ vars.MONITOR_EMAIL_ENABLED }}
+          MONITOR_EMAIL_TO: ${{ vars.MONITOR_EMAIL_TO }}
+          MONITOR_EMAIL_FROM: ${{ vars.MONITOR_EMAIL_FROM }}
+          MONITOR_RESEND_API_KEY: ${{ secrets.MONITOR_RESEND_API_KEY }}
+          MONITOR_SMTP_HOST: ${{ secrets.MONITOR_SMTP_HOST }}
+          MONITOR_SMTP_PORT: ${{ secrets.MONITOR_SMTP_PORT }}
+          MONITOR_SMTP_USER: ${{ secrets.MONITOR_SMTP_USER }}
+          MONITOR_SMTP_PASSWORD: ${{ secrets.MONITOR_SMTP_PASSWORD }}
+          SUBJECT: ${{ steps.report.outputs.subject }}
+          BODY_FILE: ${{ steps.report.outputs.report_path }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MONITOR_EMAIL_ENABLED}" ]; then MONITOR_EMAIL_ENABLED=true; fi
+          .github/scripts/monitor/send-email.sh | tee /tmp/email-status.txt
+          if grep -q 'EMAIL_STATUS=FAIL' /tmp/email-status.txt; then exit 1; fi

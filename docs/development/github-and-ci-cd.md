@@ -14,6 +14,10 @@ Commit and push with your normal Git workflow, then open a pull request against 
 
 **Note:** As of the CI/CD audit, the GitHub repository visibility was **public**. Confirm whether that matches your policy.
 
+## Monitor (read-only)
+
+Workflow: `.github/workflows/monitor.yml` — CI failure triage, weekly safe re-checks, optional HTTP probes, email reports. **No automatic remediation.** Setup: [../monitoring.md](../monitoring.md).
+
 ## What CI runs
 
 Workflow: `.github/workflows/ci.yml`  

@@ -81,6 +81,7 @@ Platform host (`PLATFORM_HOSTNAME`, `localhost` in development) never opens a te
 | Database Explorer + read-only SQL console | **Implemented** (needs read-only explorer URLs; else 503) |
 | Docker local + prod Compose | **Implemented** |
 | GitHub Actions CI | **Implemented** |
+| Read-only health/CI monitor + email | **Implemented** (configure secrets per [docs/monitoring.md](docs/monitoring.md); push workflow to GitHub to activate) |
 | GHCR image publish / CD deploy | **Designed** — activate per [docs/ci-cd-deployment.md](docs/ci-cd-deployment.md); may require pushing workflows and host config |
 | Platform audit **UI** | **Not implemented** (API exists) |
 | Email invitations / billing plans | **Not implemented** |
@@ -161,6 +162,7 @@ There are **no default passwords** in git. Passwords must be at least **12 chara
 | [docs/deployment/migrations-and-backups.md](docs/deployment/migrations-and-backups.md) | Migrations / backups |
 | [docs/deployment.md](docs/deployment.md) | Staging/prod ops reference |
 | [docs/ci-cd-deployment.md](docs/ci-cd-deployment.md) | CD secrets and gates |
+| [docs/monitoring.md](docs/monitoring.md) | Read-only CI/health monitor and email alerts |
 
 ## Tests
 

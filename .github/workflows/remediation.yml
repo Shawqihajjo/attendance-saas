@@ -1,0 +1,253 @@
+# Approval-gated remediation (separate from read-only Monitor).
+#
+# Dual gate:
+#   1) GitHub Environment "remediation" (configure required reviewers in repo settings)
+#   2) Issue must be open, contain FINDING_ID, and have label remediation-approved
+#
+# This workflow prepares an isolated branch + draft PR + audit trail.
+# It does not merge, deploy, or apply broad architectural changes.
+# Application code fixes must stay within the approved finding scope on that branch.
+
+name: Remediation
+
+on:
+  workflow_dispatch:
+    inputs:
+      finding_id:
+        description: Finding ID (e.g. FINDING-20261014-120000-abc1234-1)
+        required: true
+        type: string
+      issue_number:
+        description: GitHub Issue number that tracks this finding
+        required: true
+        type: string
+      confirm_finding_id:
+        description: Re-type the Finding ID to confirm (must match exactly)
+        required: true
+        type: string
+      approved_scope:
+        description: Exact scope you authorize (one finding only)
+        required: true
+        type: string
+      finding_artifact_run_id:
+        description: Optional Monitor workflow run ID to download finding JSON artifact from
+        required: false
+        type: string
+
+concurrency:
+  group: remediation-${{ inputs.finding_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Gate: environment approval + issue label verification
+  # ---------------------------------------------------------------------------
+  gate:
+    name: Verify approval
+    runs-on: ubuntu-24.04
+    environment: remediation
+    permissions:
+      contents: read
+      issues: read
+      actions: read
+    outputs:
+      finding_id: ${{ steps.verify.outputs.finding_id }}
+      issue_number: ${{ steps.verify.outputs.issue_number }}
+      approver: ${{ steps.verify.outputs.approver }}
+    steps:
+      - name: Check out scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Verify approval gate
+        id: verify
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FINDING_ID: ${{ inputs.finding_id }}
+          CONFIRM_FINDING_ID: ${{ inputs.confirm_finding_id }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          APPROVAL_LABEL: remediation-approved
+          APPROVAL_MAX_AGE_HOURS: ${{ vars.REMEDIATION_APPROVAL_MAX_AGE_HOURS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x .github/scripts/remediation/*.sh
+          # Prove unit tests still hold in CI context for the gate script
+          .github/scripts/remediation/verify-approval.test.sh
+          if [ -z "${APPROVAL_MAX_AGE_HOURS}" ]; then APPROVAL_MAX_AGE_HOURS=168; fi
+          OUT="$(FINDING_ID="$FINDING_ID" CONFIRM_FINDING_ID="$CONFIRM_FINDING_ID" \
+            ISSUE_NUMBER="$ISSUE_NUMBER" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            APPROVAL_LABEL="$APPROVAL_LABEL" APPROVAL_MAX_AGE_HOURS="$APPROVAL_MAX_AGE_HOURS" \
+            .github/scripts/remediation/verify-approval.sh)"
+          echo "$OUT"
+          echo "finding_id=${FINDING_ID}" >> "$GITHUB_OUTPUT"
+          echo "issue_number=${ISSUE_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "approver=${{ github.actor }}" >> "$GITHUB_OUTPUT"
+
+      - name: Deny path notice
+        if: failure()
+        run: |
+          echo "::error::Remediation blocked — missing/invalid/expired approval. No branch, PR, or code changes were made."
+
+  # ---------------------------------------------------------------------------
+  # Prepare isolated branch + draft PR (post-gate only)
+  # ---------------------------------------------------------------------------
+  prepare:
+    name: Prepare remediation branch
+    needs: [gate, gate-unit-tests]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read
+    outputs:
+      pr_url: ${{ steps.prep.outputs.pr_url }}
+      branch: ${{ steps.prep.outputs.branch }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Locate finding JSON
+        id: finding
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FINDING_ID: ${{ needs.gate.outputs.finding_id }}
+          ISSUE_NUMBER: ${{ needs.gate.outputs.issue_number }}
+          ARTIFACT_RUN: ${{ inputs.finding_artifact_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/finding
+          # Prefer artifact from Monitor run when provided
+          if [ -n "${ARTIFACT_RUN}" ]; then
+            gh run download "${ARTIFACT_RUN}" --repo "${{ github.repository }}" --dir /tmp/art || true
+            FOUND="$(find /tmp/art -name "${FINDING_ID}.json" 2>/dev/null | head -1 || true)"
+            if [ -n "$FOUND" ]; then
+              cp "$FOUND" "/tmp/finding/${FINDING_ID}.json"
+            fi
+          fi
+          if [ ! -f "/tmp/finding/${FINDING_ID}.json" ]; then
+            # Reconstruct minimal finding from the issue body fields
+            BODY="$(gh api "/repos/${{ github.repository }}/issues/${ISSUE_NUMBER}" --jq .body)"
+            FINDING_ID="$FINDING_ID" ISSUE_NUMBER="$ISSUE_NUMBER" BODY="$BODY" \
+              REPO="${{ github.repository }}" ACTOR="${{ github.actor }}" OUT_DIR=/tmp/finding \
+              python3 .github/scripts/remediation/reconstruct-finding.py
+          fi
+          echo "path=/tmp/finding/${FINDING_ID}.json" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare branch and draft PR
+        id: prep
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FINDING_ID: ${{ needs.gate.outputs.finding_id }}
+          ISSUE_NUMBER: ${{ needs.gate.outputs.issue_number }}
+          APPROVED_SCOPE: ${{ inputs.approved_scope }}
+          APPROVER: ${{ needs.gate.outputs.approver }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          FINDING_JSON: ${{ steps.finding.outputs.path }}
+          BASE_REF: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          chmod +x .github/scripts/remediation/*.sh
+          .github/scripts/remediation/prepare-branch.sh | tee /tmp/prep.out
+          # prepare-branch writes GITHUB_OUTPUT; also parse PR_URL
+          PR="$(sed -n 's/^PR_URL=//p' /tmp/prep.out | tail -1)"
+          echo "pr_url=${PR}" >> "$GITHUB_OUTPUT"
+          echo "branch=remediation/${FINDING_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Comment audit trail on issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh issue comment "${{ needs.gate.outputs.issue_number }}" --repo "${{ github.repository }}" --body "$(cat <<EOF
+          ### Remediation authorized
+
+          | Field | Value |
+          | --- | --- |
+          | Finding | \`${{ needs.gate.outputs.finding_id }}\` |
+          | Approver (dispatch) | \`${{ needs.gate.outputs.approver }}\` |
+          | Scope | ${{ inputs.approved_scope }} |
+          | Branch | \`${{ steps.prep.outputs.branch }}\` |
+          | Draft PR | ${{ steps.prep.outputs.pr_url }} |
+          | Monitor/Remediation run | ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} |
+
+          Application fixes must be committed on this branch **within the approved scope only**. This workflow does not merge or deploy.
+          EOF
+          )"
+
+      - name: Write audit artifact
+        run: |
+          set -euo pipefail
+          mkdir -p remediation-audit
+          cat > "remediation-audit/${{ needs.gate.outputs.finding_id }}.md" <<EOF
+          # Remediation audit — ${{ needs.gate.outputs.finding_id }}
+
+          | Field | Value |
+          | --- | --- |
+          | Finding ID | ${{ needs.gate.outputs.finding_id }} |
+          | Approver | ${{ needs.gate.outputs.approver }} |
+          | Approved scope | ${{ inputs.approved_scope }} |
+          | Issue | #${{ needs.gate.outputs.issue_number }} |
+          | Branch | ${{ steps.prep.outputs.branch }} |
+          | Draft PR | ${{ steps.prep.outputs.pr_url }} |
+          | Workflow run | ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} |
+          | UTC | $(date -u +%Y-%m-%dT%H:%M:%SZ) |
+
+          Tests: not executed in prepare phase (authority package only). Run CI checks after pushing the fix commits.
+          Remaining risks: scope creep; incomplete regression coverage; production deploy still separately gated.
+          EOF
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: remediation-audit-${{ needs.gate.outputs.finding_id }}
+          path: remediation-audit/
+
+      - name: Email remediation summary
+        env:
+          MONITOR_EMAIL_ENABLED: ${{ vars.MONITOR_EMAIL_ENABLED }}
+          MONITOR_EMAIL_TO: ${{ vars.MONITOR_EMAIL_TO }}
+          MONITOR_EMAIL_FROM: ${{ vars.MONITOR_EMAIL_FROM }}
+          MONITOR_RESEND_API_KEY: ${{ secrets.MONITOR_RESEND_API_KEY }}
+          MONITOR_SMTP_HOST: ${{ secrets.MONITOR_SMTP_HOST }}
+          MONITOR_SMTP_PORT: ${{ secrets.MONITOR_SMTP_PORT }}
+          MONITOR_SMTP_USER: ${{ secrets.MONITOR_SMTP_USER }}
+          MONITOR_SMTP_PASSWORD: ${{ secrets.MONITOR_SMTP_PASSWORD }}
+          SUBJECT: "[REMEDIATION] ${{ needs.gate.outputs.finding_id }} branch prepared"
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          chmod +x .github/scripts/monitor/*.sh
+          BODY_FILE="remediation-audit/${{ needs.gate.outputs.finding_id }}.md"
+          {
+            echo "Draft PR: ${{ steps.prep.outputs.pr_url }}"
+            echo "Branch: ${{ steps.prep.outputs.branch }}"
+            echo "Approved scope: ${{ inputs.approved_scope }}"
+            echo
+            cat "$BODY_FILE"
+          } > /tmp/remediation-mail.txt
+          BODY_FILE=/tmp/remediation-mail.txt
+          export BODY_FILE
+          if [ -z "${MONITOR_EMAIL_ENABLED}" ]; then MONITOR_EMAIL_ENABLED=true; fi
+          .github/scripts/monitor/send-email.sh | tee /tmp/email-status.txt
+          if grep -q 'EMAIL_STATUS=FAIL' /tmp/email-status.txt; then exit 1; fi
+
+  # Offline proof job always available on dispatch (runs even if someone tries to skip env — actually still needs dispatch)
+  gate-unit-tests:
+    name: Approval gate unit tests
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Run verify-approval tests
+        run: |
+          chmod +x .github/scripts/remediation/*.sh
+          .github/scripts/remediation/verify-approval.test.sh
