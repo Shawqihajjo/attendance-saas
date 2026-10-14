@@ -6,10 +6,20 @@ The application is a multi-tenant SaaS for employee attendance. Each customer or
 
 | Read next | When |
 | --- | --- |
-| [development-setup.md](development-setup.md) | First-time local setup, env vars, tests, CI/CD overview |
-| [ci.md](ci.md) | GitHub Actions CI jobs and triggers |
-| [ci-cd-deployment.md](ci-cd-deployment.md) | CD pipeline, GitHub secrets/vars, staging/production plan |
-| [development.md](development.md) | Run the local stack and day-to-day diagnostics |
+| [installation/local-development.md](installation/local-development.md) | Install from scratch on a clean machine |
+| [installation/prerequisites.md](installation/prerequisites.md) | Docker and version prerequisites |
+| [installation/environment-configuration.md](installation/environment-configuration.md) | Environment variables |
+| [installation/database-setup.md](installation/database-setup.md) | Platform and tenant databases |
+| [installation/troubleshooting.md](installation/troubleshooting.md) | Common failures |
+| [architecture/system-overview.md](architecture/system-overview.md) | Component diagram |
+| [user-guide/super-admin.md](user-guide/super-admin.md) | Role-based operator guides (see `user-guide/`) |
+| [development/testing.md](development/testing.md) | How to run tests |
+| [development/github-and-ci-cd.md](development/github-and-ci-cd.md) | GitHub Actions and CD |
+| [deployment/production-deployment.md](deployment/production-deployment.md) | Production summary |
+| [development-setup.md](development-setup.md) | Shorter setup checklist (legacy entry) |
+| [ci.md](ci.md) | CI job details |
+| [ci-cd-deployment.md](ci-cd-deployment.md) | CD secrets/vars and gates |
+| [development.md](development.md) | Day-to-day diagnostics |
 | [tenant-databases.md](tenant-databases.md) | Provision, migrate, suspend, or drop a tenant |
 | [architecture.md](architecture.md) | Table-level design and decision log |
 | [terminal-hardware.md](terminal-hardware.md) | Add a fingerprint or camera adapter |

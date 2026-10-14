@@ -1,6 +1,8 @@
 # Development setup
 
-This guide gets a developer from a clean checkout to a running local stack, tests, and a basic understanding of CI/CD. Deeper product and architecture notes stay in [README.md](README.md) and [architecture.md](architecture.md). Day-to-day environment details are also in [development.md](development.md).
+This guide gets a developer from a clean checkout to a running local stack, tests, and a basic understanding of CI/CD.
+
+For a full **install-from-scratch** narrative (prerequisites through first login and tests), prefer [installation/local-development.md](installation/local-development.md). Deeper product and architecture notes stay in [README.md](README.md) and [architecture.md](architecture.md). Day-to-day environment details are also in [development.md](development.md).
 
 ## Overview
 
@@ -99,9 +101,10 @@ Use `.env.prod.example` as the checklist. Fill every blank from a secret store. 
 
 ## Test commands
 
-Tests do not need a fingerprint reader, camera, Redis, or RabbitMQ. Backend PHPUnit forces SQLite.
+Tests do not need a fingerprint reader, camera, Redis, or RabbitMQ. Backend PHPUnit forces SQLite. On a fresh clone, create `backend/.env` from `.env.test` first (Symfony Dotenv requires `.env`):
 
 ```sh
+docker compose exec php sh -c 'test -f .env || cp .env.test .env'
 docker compose exec php php vendor/bin/phpunit
 docker compose exec php php vendor/bin/phpstan analyse --memory-limit=512M
 docker compose exec frontend npm test
