@@ -1,0 +1,5 @@
+# Require review for all Cursor project rules
+/.cursor/rules/ @shawqihajjo
+
+# Protect the ownership policy itself
+/.github/CODEOWNERS @shawqihajjo
