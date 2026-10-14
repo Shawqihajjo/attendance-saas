@@ -1,8 +1,11 @@
 # Staging and production. Development stays on docker-compose.yml.
 # docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build
 
+# Override ATTENDANCE_PHP_IMAGE / ATTENDANCE_NGINX_IMAGE to pin GHCR digests/tags
+# (for example ghcr.io/<owner>/attendance-php:sha-<commit>). Local builds still work
+# when those variables are unset (default attendance-*:prod tags).
 x-php-image: &php-image
-  image: attendance-php:prod
+  image: ${ATTENDANCE_PHP_IMAGE:-attendance-php:prod}
   build:
     context: .
     dockerfile: docker/php/Dockerfile.prod
@@ -34,7 +37,7 @@ x-app-environment: &app-environment
 
 services:
   nginx:
-    image: attendance-nginx:prod
+    image: ${ATTENDANCE_NGINX_IMAGE:-attendance-nginx:prod}
     build:
       context: .
       dockerfile: docker/nginx/Dockerfile

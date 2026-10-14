@@ -1,0 +1,204 @@
+# Continuous deployment for Compose hosts documented in docs/deployment.md.
+#
+# DISABLED BY DEFAULT. No host, IP, or cloud provider is configured in this repository.
+# Set repository/environment variables and secrets listed in docs/ci-cd-deployment.md,
+# then set DEPLOY_ENABLED=true to activate.
+#
+# Pull requests never deploy. Production never runs from workflow_run (approval only).
+
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Deployment target
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      image_tag:
+        description: Immutable image tag (sha-<12|40> or vX.Y.Z). Never use latest.
+        required: true
+        type: string
+      run_backup:
+        description: Backup databases before migrations (staging/production)
+        required: false
+        type: boolean
+        default: true
+  workflow_run:
+    workflows: [Release images]
+    types: [completed]
+
+concurrency:
+  group: deploy-${{ github.event.inputs.target || 'staging' }}-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  status:
+    name: Deployment configuration status
+    runs-on: ubuntu-24.04
+    outputs:
+      enabled: ${{ steps.gate.outputs.enabled }}
+      staging_ready: ${{ steps.gate.outputs.staging_ready }}
+      production_ready: ${{ steps.gate.outputs.production_ready }}
+      image_tag: ${{ steps.tag.outputs.image_tag }}
+      auto_staging: ${{ steps.tag.outputs.auto_staging }}
+    steps:
+      - name: Gate on configuration
+        id: gate
+        env:
+          DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
+          STAGING_HOST: ${{ vars.DEPLOY_STAGING_HOST }}
+          PRODUCTION_HOST: ${{ vars.DEPLOY_PRODUCTION_HOST }}
+        run: |
+          set -euo pipefail
+          enabled=false
+          staging_ready=false
+          production_ready=false
+          if [ "${DEPLOY_ENABLED}" = "true" ]; then
+            enabled=true
+          fi
+          if [ "$enabled" = "true" ] && [ -n "${STAGING_HOST}" ]; then
+            staging_ready=true
+          fi
+          if [ "$enabled" = "true" ] && [ -n "${PRODUCTION_HOST}" ]; then
+            production_ready=true
+          fi
+          echo "enabled=${enabled}" >> "$GITHUB_OUTPUT"
+          echo "staging_ready=${staging_ready}" >> "$GITHUB_OUTPUT"
+          echo "production_ready=${production_ready}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Deployment gate"
+            echo
+            echo "- DEPLOY_ENABLED: \`${DEPLOY_ENABLED:-unset}\`"
+            echo "- Staging host configured: \`${staging_ready}\`"
+            echo "- Production host configured: \`${production_ready}\`"
+            echo
+            if [ "$enabled" != "true" ]; then
+              echo "Deployment jobs are **inactive**. Configure hosts and secrets, then set \`DEPLOY_ENABLED=true\`. See \`docs/ci-cd-deployment.md\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Resolve image tag
+        id: tag
+        run: |
+          set -euo pipefail
+          auto_staging=false
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.image_tag }}"
+          else
+            # Auto-staging only after a successful Release images run on main.
+            if [ "${{ github.event.workflow_run.conclusion }}" = "success" ] \
+              && [ "${{ github.event.workflow_run.event }}" = "push" ] \
+              && [ "${{ github.event.workflow_run.head_branch }}" = "main" ]; then
+              SHORT="$(printf '%s' '${{ github.event.workflow_run.head_sha }}' | cut -c1-12)"
+              TAG="sha-${SHORT}"
+              auto_staging=true
+            else
+              TAG=""
+            fi
+          fi
+          if [ -n "$TAG" ] && { [ "$TAG" = "latest" ] || [ "$TAG" = "main" ]; }; then
+            echo "Refusing mutable tag '${TAG}'. Use sha-* or a v* release tag." >&2
+            exit 1
+          fi
+          echo "image_tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "auto_staging=${auto_staging}" >> "$GITHUB_OUTPUT"
+          echo "Resolved image tag: ${TAG:-none}"
+
+  staging:
+    name: Deploy staging
+    needs: status
+    runs-on: ubuntu-24.04
+    environment: staging
+    timeout-minutes: 45
+    if: >
+      needs.status.outputs.staging_ready == 'true' &&
+      needs.status.outputs.image_tag != '' &&
+      (
+        (github.event_name == 'workflow_dispatch' && inputs.target == 'staging') ||
+        (github.event_name == 'workflow_run' && needs.status.outputs.auto_staging == 'true')
+      )
+    concurrency:
+      group: deploy-staging-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - name: Check out
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Deploy over SSH
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_STAGING_HOST }}
+          DEPLOY_USER: ${{ vars.DEPLOY_STAGING_USER }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_STAGING_PORT }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_STAGING_PATH }}
+          ENV_FILE: ${{ vars.DEPLOY_STAGING_ENV_FILE }}
+          IMAGE_TAG: ${{ needs.status.outputs.image_tag }}
+          GHCR_OWNER: ${{ vars.GHCR_OWNER }}
+          RUN_BACKUP: ${{ github.event_name == 'workflow_dispatch' && inputs.run_backup || true }}
+          SSH_KEY: ${{ secrets.DEPLOY_STAGING_SSH_KEY }}
+          GHCR_TOKEN: ${{ secrets.DEPLOY_GHCR_READ_TOKEN }}
+          HEALTHCHECK_URL: ${{ vars.DEPLOY_STAGING_HEALTHCHECK_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GHCR_OWNER}" ]; then
+            GHCR_OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+            export GHCR_OWNER
+          fi
+          if [ -z "${ENV_FILE}" ]; then
+            ENV_FILE=.env.staging
+            export ENV_FILE
+          fi
+          chmod +x docker/deploy/ci-ssh-deploy.sh docker/deploy/release.sh
+          docker/deploy/ci-ssh-deploy.sh staging
+
+  production:
+    name: Deploy production
+    needs: status
+    runs-on: ubuntu-24.04
+    # Protected GitHub Environment "production" must require reviewers in repo settings.
+    environment: production
+    timeout-minutes: 60
+    if: >
+      needs.status.outputs.production_ready == 'true' &&
+      needs.status.outputs.image_tag != '' &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.target == 'production'
+    concurrency:
+      group: deploy-production-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - name: Check out
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Deploy over SSH
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_PRODUCTION_HOST }}
+          DEPLOY_USER: ${{ vars.DEPLOY_PRODUCTION_USER }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PRODUCTION_PORT }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PRODUCTION_PATH }}
+          ENV_FILE: ${{ vars.DEPLOY_PRODUCTION_ENV_FILE }}
+          IMAGE_TAG: ${{ needs.status.outputs.image_tag }}
+          GHCR_OWNER: ${{ vars.GHCR_OWNER }}
+          RUN_BACKUP: ${{ inputs.run_backup }}
+          SSH_KEY: ${{ secrets.DEPLOY_PRODUCTION_SSH_KEY }}
+          GHCR_TOKEN: ${{ secrets.DEPLOY_GHCR_READ_TOKEN }}
+          HEALTHCHECK_URL: ${{ vars.DEPLOY_PRODUCTION_HEALTHCHECK_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GHCR_OWNER}" ]; then
+            GHCR_OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+            export GHCR_OWNER
+          fi
+          if [ -z "${ENV_FILE}" ]; then
+            ENV_FILE=.env.prod
+            export ENV_FILE
+          fi
+          chmod +x docker/deploy/ci-ssh-deploy.sh docker/deploy/release.sh
+          docker/deploy/ci-ssh-deploy.sh production

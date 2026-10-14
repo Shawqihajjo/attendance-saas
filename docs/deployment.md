@@ -44,16 +44,29 @@ From a host that has the env file and the Docker socket. Set `COMPOSE_PROJECT_NA
 COMPOSE_PROJECT_NAME=attendance ENV_FILE=.env.prod docker/deploy/release.sh
 ```
 
-Staging uses the same script with `ENV_FILE` pointing at the staging file. The script refuses to continue unless `APP_ENV=prod` and `APP_DEBUG=0`. It builds the images, starts MySQL, Redis, and RabbitMQ, applies platform migrations, migrates every existing tenant database, starts Nginx, PHP, and the worker, then runs `app:diagnostics`.
+To deploy a **pinned GHCR image** instead of building on the host:
+
+```sh
+COMPOSE_PROJECT_NAME=attendance \
+  ENV_FILE=.env.prod \
+  DEPLOY_MODE=pull \
+  IMAGE_TAG=sha-<12-char-git-sha> \
+  GHCR_OWNER=<lowercase-github-owner> \
+  BACKUP_BEFORE_MIGRATE=1 \
+  docker/deploy/release.sh
+```
+
+Staging uses the same script with `ENV_FILE` pointing at the staging file. The script refuses to continue unless `APP_ENV=prod` and `APP_DEBUG=0`. Continuous deployment wiring, GitHub variables/secrets, and the enablement checklist are in [ci-cd-deployment.md](ci-cd-deployment.md). No production host is configured in this repository yet.
 
 The order is fixed:
 
-1. Build the PHP image and the Nginx image. The PHP image installs production dependencies, drops `backend/.env` and the test configuration, and does not run Composer at container start.
-2. Start MySQL, Redis, and RabbitMQ and wait until their health checks pass.
-3. `doctrine:migrations:migrate` on the platform database.
-4. `app:tenant:migrate --all`, one tenant database at a time.
-5. Start PHP-FPM, Nginx, and the Messenger consumer.
-6. `app:diagnostics` must report `ok`.
+1. Build the PHP and Nginx images (`DEPLOY_MODE=build`, default), or pull immutable GHCR tags (`DEPLOY_MODE=pull`).
+2. Start MySQL, Redis, and RabbitMQ and wait until their health checks pass (`docker compose up --wait`).
+3. Optional: `BACKUP_BEFORE_MIGRATE=1` runs `backup-databases.sh` before schema changes.
+4. Stop the Messenger consumer, then `doctrine:migrations:migrate` on the platform database.
+5. `app:tenant:migrate --all`, one tenant database at a time.
+6. Start PHP-FPM, Nginx, and the Messenger consumer.
+7. `app:diagnostics` must report `ok`, then HTTP liveness, readiness, and frontend probes.
 
 A failed tenant migration stops the command. Databases that already migrated stay migrated. Fix the migration and run `app:tenant:migrate --all` again. Do not roll a production schema backward. Ship a forward migration.
 
@@ -100,7 +113,15 @@ Restore stops the worker first, restores the platform database, restores each te
 
 ### Rollback
 
-Stop the Messenger consumer first so a new domain event is not handled by an old release. Deploy the previous image. Leave the schema where the forward migration put it. If the release depended on a schema change, ship a forward fix. Do not run a down migration against production.
+Stop the Messenger consumer first so a new domain event is not handled by an old release. Deploy the previous **immutable** image tag (do not use `latest`). Leave the schema where the forward migration put it. If the release depended on a schema change, ship a forward fix. Do not run a down migration against production.
+
+```sh
+COMPOSE_PROJECT_NAME=attendance \
+  ENV_FILE=.env.prod \
+  IMAGE_TAG=sha-<previous> \
+  GHCR_OWNER=<lowercase-github-owner> \
+  docker/deploy/rollback.sh
+```
 
 ## Configuration reference
 

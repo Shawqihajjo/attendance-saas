@@ -8,6 +8,7 @@ The application is a multi-tenant SaaS for employee attendance. Each customer or
 | --- | --- |
 | [development-setup.md](development-setup.md) | First-time local setup, env vars, tests, CI/CD overview |
 | [ci.md](ci.md) | GitHub Actions CI jobs and triggers |
+| [ci-cd-deployment.md](ci-cd-deployment.md) | CD pipeline, GitHub secrets/vars, staging/production plan |
 | [development.md](development.md) | Run the local stack and day-to-day diagnostics |
 | [tenant-databases.md](tenant-databases.md) | Provision, migrate, suspend, or drop a tenant |
 | [architecture.md](architecture.md) | Table-level design and decision log |

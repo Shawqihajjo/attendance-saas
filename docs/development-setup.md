@@ -126,8 +126,8 @@ Pull request and `main`/`develop` checks are defined in `.github/workflows/ci.ym
 
 1. **CI (automated):** PHPUnit, PHPStan, Composer validate and audit, Vitest, ESLint, TypeScript, frontend production build, Compose config validation, production image builds (no push, no deploy).
 2. **Main / tags (later):** Publish PHP and Nginx images to a registry.
-3. **Staging / production (later):** Run `docker/deploy/release.sh` with a private env file: platform migrations, then `app:tenant:migrate --all`, then start app and worker, then `app:diagnostics`.
-4. **Rollback:** Redeploy the previous image. Do not run Doctrine down migrations against production tenant data.
+3. **Staging / production:** When a host exists, use GHCR tags + `docker/deploy/release.sh` (or the Deploy workflow). Details: [ci-cd-deployment.md](ci-cd-deployment.md).
+4. **Rollback:** `docker/deploy/rollback.sh` with the previous `sha-*` / `v*` tag. Do not run Doctrine down migrations against production tenant data.
 
 Never point CI at production tenant databases. PHPUnit’s SQLite configuration is the safe default for automated checks.
 

@@ -58,14 +58,14 @@ Backend tests use SQLite and do not require Redis, RabbitMQ, or live tenant MySQ
 
 ## CI/CD overview
 
-GitHub Actions CI is in `.github/workflows/ci.yml` (see [docs/ci.md](docs/ci.md)):
+GitHub Actions workflows (see [docs/ci.md](docs/ci.md)):
 
-1. Pull request / push to `main` or `develop`: PHPUnit, PHPStan, Composer validate and audit, Vitest, ESLint, TypeScript, frontend build, Compose validation, Docker image builds (no push).
-2. Release tags (later): publish PHP and Nginx images.
-3. Deploy (later): platform migrations, then `app:tenant:migrate --all`, then start PHP, Nginx, and the Messenger worker; verify with `app:diagnostics`.
-4. Rollback: previous image only; no destructive down-migrations on tenant data.
+1. **CI** (`.github/workflows/ci.yml`): pull request / push to `main` or `develop`, and `v*` tags — PHPUnit, PHPStan, Composer validate and audit, Vitest, ESLint, TypeScript, frontend build, Compose validation, Docker image builds (no push).
+2. **Release images** (`.github/workflows/release-images.yml`): after CI succeeds on a push to `main` or a `v*` tag, publish `attendance-php` and `attendance-nginx` to GHCR with immutable `sha-*` tags. Pull requests never publish.
+3. **Deploy** (`.github/workflows/deploy.yml`): SSH + Compose release on staging/production — **inactive** until hosting variables are set (`DEPLOY_ENABLED=true`). See [docs/ci-cd-deployment.md](docs/ci-cd-deployment.md).
+4. Rollback: previous immutable image via `docker/deploy/rollback.sh`; no destructive down-migrations on tenant data.
 
-See [docs/deployment.md](docs/deployment.md) and [docs/development-setup.md](docs/development-setup.md).
+See [docs/deployment.md](docs/deployment.md), [docs/ci-cd-deployment.md](docs/ci-cd-deployment.md), and [docs/development-setup.md](docs/development-setup.md).
 
 ## Security notes for contributors
 

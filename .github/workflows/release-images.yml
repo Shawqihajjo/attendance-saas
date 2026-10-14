@@ -1,0 +1,246 @@
+# Build and publish production images to GitHub Container Registry.
+# Publishes only after the CI workflow succeeds on a push to main or a v* tag.
+# Pull requests and fork workflows never publish.
+
+name: Release images
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build (branch, tag, or commit SHA). Defaults to the default branch tip.
+        required: false
+        type: string
+
+concurrency:
+  group: release-images-${{ github.event.workflow_run.head_branch || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to GHCR
+    runs-on: ubuntu-24.04
+    # packages:write only on this publishing job
+    permissions:
+      contents: read
+      packages: write
+      # Required for buildx GHA cache (cache-from/cache-to type=gha).
+      # Also covers reading prior CI runs for workflow_dispatch gating.
+      actions: write
+    # Trusted push completions only. Never publish from pull_request CI runs.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.repository.full_name == github.repository &&
+        (
+          github.event.workflow_run.head_branch == 'main' ||
+          startsWith(github.event.workflow_run.head_branch, 'v')
+        )
+      )
+    env:
+      REGISTRY: ghcr.io
+    steps:
+      - name: Resolve commit and tags
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            REF="${{ inputs.ref }}"
+            if [ -z "$REF" ]; then
+              REF="${{ github.ref }}"
+            fi
+            echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+            # Checkout resolves the commit; sha filled after checkout for dispatch.
+            echo "sha_pending=true" >> "$GITHUB_OUTPUT"
+            BRANCH_OR_TAG="${REF##*/}"
+          else
+            SHA="${{ github.event.workflow_run.head_sha }}"
+            BRANCH_OR_TAG="${{ github.event.workflow_run.head_branch }}"
+            echo "ref=${SHA}" >> "$GITHUB_OUTPUT"
+            echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+            echo "sha_pending=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "branch_or_tag=${BRANCH_OR_TAG}" >> "$GITHUB_OUTPUT"
+          OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "owner=${OWNER}" >> "$GITHUB_OUTPUT"
+          echo "php_image=${{ env.REGISTRY }}/${OWNER}/attendance-php" >> "$GITHUB_OUTPUT"
+          echo "nginx_image=${{ env.REGISTRY }}/${OWNER}/attendance-nginx" >> "$GITHUB_OUTPUT"
+
+      - name: Check out
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ steps.meta.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Record commit SHA
+        id: rev
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA="$(git rev-parse HEAD)"
+          SHORT="$(git rev-parse --short=12 HEAD)"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "short=${SHORT}" >> "$GITHUB_OUTPUT"
+          echo "Building images from commit ${SHA}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      - name: Verify CI succeeded for this commit
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA="${{ steps.rev.outputs.sha }}"
+          # workflow_dispatch must not publish unless CI already passed on this SHA.
+          CONCLUSION="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=${SHA}&event=push&status=completed&per_page=20" \
+            --jq '[.workflow_runs[] | select(.conclusion=="success")] | length')"
+          if [ "${CONCLUSION}" = "0" ] || [ -z "${CONCLUSION}" ]; then
+            echo "No successful CI push run found for ${SHA}. Refusing to publish."
+            exit 1
+          fi
+          echo "Found successful CI run(s) for ${SHA}."
+
+      - name: Restrict workflow_dispatch refs
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          REF="${{ steps.meta.outputs.branch_or_tag }}"
+          # Also accept full refs like refs/heads/main or refs/tags/v1.0.0
+          SHORT="${REF##*/}"
+          if [ "${SHORT}" != "main" ] && [[ "${SHORT}" != v* ]]; then
+            echo "workflow_dispatch only publishes main or v* tags (got: ${REF})."
+            exit 1
+          fi
+
+      - name: Log in to GHCR
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA="${{ steps.rev.outputs.sha }}"
+          SHORT="${{ steps.rev.outputs.short }}"
+          # Prefer the workflow_run / dispatch ref; fall back to git for tag tip detection.
+          BRANCH_OR_TAG="${{ steps.meta.outputs.branch_or_tag }}"
+          BRANCH_OR_TAG="${BRANCH_OR_TAG##*/}"
+          if [ -z "${BRANCH_OR_TAG}" ] || [ "${BRANCH_OR_TAG}" = "${SHA}" ]; then
+            if git show-ref --verify --quiet refs/remotes/origin/main && git merge-base --is-ancestor "${SHA}" origin/main 2>/dev/null; then
+              if [ "$(git rev-parse origin/main)" = "${SHA}" ]; then
+                BRANCH_OR_TAG=main
+              fi
+            fi
+            mapfile -t POINT_TAGS < <(git tag --list 'v*' --points-at "${SHA}" || true)
+            if [ "${#POINT_TAGS[@]}" -gt 0 ]; then
+              BRANCH_OR_TAG="${POINT_TAGS[0]}"
+            fi
+          fi
+          echo "resolved_ref=${BRANCH_OR_TAG}" >> "$GITHUB_OUTPUT"
+
+          PHP="${{ steps.meta.outputs.php_image }}"
+          NGX="${{ steps.meta.outputs.nginx_image }}"
+
+          PHP_TAGS=("${PHP}:sha-${SHORT}" "${PHP}:sha-${SHA}")
+          NGX_TAGS=("${NGX}:sha-${SHORT}" "${NGX}:sha-${SHA}")
+
+          if [ "${BRANCH_OR_TAG}" = "main" ]; then
+            PHP_TAGS+=("${PHP}:main")
+            NGX_TAGS+=("${NGX}:main")
+          elif [[ "${BRANCH_OR_TAG}" == v* ]]; then
+            PHP_TAGS+=("${PHP}:${BRANCH_OR_TAG}")
+            NGX_TAGS+=("${NGX}:${BRANCH_OR_TAG}")
+            # Also publish major.minor when the tag looks like v1.2.3
+            if [[ "${BRANCH_OR_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              MINOR="${BRANCH_OR_TAG%.*}"
+              PHP_TAGS+=("${PHP}:${MINOR}")
+              NGX_TAGS+=("${NGX}:${MINOR}")
+            fi
+          fi
+
+          {
+            echo "php_tags<<EOF"
+            printf '%s\n' "${PHP_TAGS[@]}"
+            echo "EOF"
+            echo "nginx_tags<<EOF"
+            printf '%s\n' "${NGX_TAGS[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Resolved ref: ${BRANCH_OR_TAG}"
+          echo "PHP tags:"; printf '  %s\n' "${PHP_TAGS[@]}"
+          echo "Nginx tags:"; printf '  %s\n' "${NGX_TAGS[@]}"
+
+      - name: Build and push PHP production image
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        with:
+          context: .
+          file: docker/php/Dockerfile.prod
+          push: true
+          tags: ${{ steps.tags.outputs.php_tags }}
+          labels: |
+            org.opencontainers.image.title=attendance-php
+            org.opencontainers.image.description=Attendance API PHP-FPM production image
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.rev.outputs.sha }}
+            org.opencontainers.image.licenses=proprietary
+          cache-from: type=gha,scope=attendance-php-prod
+          cache-to: type=gha,mode=max,scope=attendance-php-prod
+
+      - name: Build and push Nginx production image
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        with:
+          context: .
+          file: docker/nginx/Dockerfile
+          push: true
+          tags: ${{ steps.tags.outputs.nginx_tags }}
+          labels: |
+            org.opencontainers.image.title=attendance-nginx
+            org.opencontainers.image.description=Attendance Nginx + built React frontend
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.rev.outputs.sha }}
+            org.opencontainers.image.licenses=proprietary
+          cache-from: type=gha,scope=attendance-nginx-prod
+          cache-to: type=gha,mode=max,scope=attendance-nginx-prod
+
+      - name: Record published images
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## Published images"
+            echo
+            echo "- Commit: \`${{ steps.rev.outputs.sha }}\`"
+            echo "- Branch or tag: \`${{ steps.tags.outputs.resolved_ref || steps.meta.outputs.branch_or_tag }}\`"
+            echo
+            echo "### attendance-php"
+            echo '```'
+            echo "${{ steps.tags.outputs.php_tags }}"
+            echo '```'
+            echo
+            echo "### attendance-nginx"
+            echo '```'
+            echo "${{ steps.tags.outputs.nginx_tags }}"
+            echo '```'
+            echo
+            echo "Image scanning with Trivy is not installed in this workflow yet; see docs/ci.md."
+          } >> "$GITHUB_STEP_SUMMARY"

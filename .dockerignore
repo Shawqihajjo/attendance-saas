@@ -13,7 +13,7 @@
 !.env.*.example
 backend/.env
 backend/.env.*
-!**/.env.test
+# Do not send .env.test into image build context (CI copies it only on the runner for PHPUnit).
 
 # TLS material
 docker/nginx/certs
@@ -25,6 +25,10 @@ backend/vendor
 backend/var
 frontend/node_modules
 frontend/dist
+
+# Runtime media and employee photographs (never bake into layers)
+**/var/photos
+**/uploads
 
 # Caches and dumps
 **/.phpunit.cache
