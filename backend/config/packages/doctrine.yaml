@@ -1,0 +1,67 @@
+doctrine:
+    dbal:
+        default_connection: platform
+        connections:
+            platform:
+                url: '%env(resolve:PLATFORM_DATABASE_URL)%'
+                profiling_collect_backtrace: '%kernel.debug%'
+                options:
+                    !php/const PDO::ATTR_PERSISTENT: false
+            tenant:
+                url: '%env(resolve:TENANT_DATABASE_URL)%'
+                profiling_collect_backtrace: '%kernel.debug%'
+                wrapper_class: App\TenantContext\Infrastructure\Doctrine\TenantAwareConnection
+                options:
+                    !php/const PDO::ATTR_PERSISTENT: false
+    orm:
+        default_entity_manager: platform
+        controller_resolver:
+            auto_mapping: false
+        entity_managers:
+            platform:
+                connection: platform
+                naming_strategy: doctrine.orm.naming_strategy.underscore
+                mappings:
+                    Platform:
+                        type: attribute
+                        is_bundle: false
+                        dir: '%kernel.project_dir%/src/Platform'
+                        prefix: 'App\Platform'
+                        alias: Platform
+            tenant:
+                connection: tenant
+                naming_strategy: doctrine.orm.naming_strategy.underscore
+                mappings:
+                    Tenant:
+                        type: attribute
+                        is_bundle: false
+                        dir: '%kernel.project_dir%/src/Tenant'
+                        prefix: 'App\Tenant'
+                        alias: Tenant
+
+when@prod:
+    doctrine:
+        orm:
+            entity_managers:
+                platform:
+                    query_cache_driver:
+                        type: pool
+                        pool: doctrine.system_cache_pool
+                    result_cache_driver:
+                        type: pool
+                        pool: doctrine.result_cache_pool
+                tenant:
+                    query_cache_driver:
+                        type: pool
+                        pool: doctrine.system_cache_pool
+                    result_cache_driver:
+                        type: pool
+                        pool: doctrine.result_cache_pool
+
+    framework:
+        cache:
+            pools:
+                doctrine.result_cache_pool:
+                    adapter: cache.app
+                doctrine.system_cache_pool:
+                    adapter: cache.system

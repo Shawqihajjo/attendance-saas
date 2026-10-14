@@ -1,0 +1,66 @@
+# Local and environment-specific secrets (any directory)
+.env
+.env.*
+!.env.example
+!.env.*.example
+!**/.env.test
+!backend/.env.test
+
+# Explicit secret and deployment env files
+.env.prod
+.env.staging
+.env.local
+backend/.env
+backend/.env.dev
+backend/.env.local
+backend/.env.local.php
+
+# TLS certificates and private keys
+docker/nginx/certs/**
+!docker/nginx/certs/.gitignore
+*.pem
+*.key
+*.p12
+*.pfx
+!**/tests/**/*.{pem,key}
+
+# Database dumps and backups
+*.sql
+*.sql.gz
+*.dump
+*.dump.gz
+backups/
+**/backups/
+
+# Application data and generated runtime files
+backend/var/
+backend/public/bundles/
+
+# Dependencies and build artifacts
+backend/vendor/
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+
+# Test and analysis caches
+backend/.phpunit.cache/
+backend/.phpstan.cache/
+frontend/coverage/
+
+# Logs
+*.log
+logs/
+
+# IDE and OS
+.idea/
+*.iml
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Local Docker overrides (if created)
+docker-compose.override.yml
+compose.override.yaml

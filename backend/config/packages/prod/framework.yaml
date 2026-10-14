@@ -1,0 +1,5 @@
+framework:
+    session:
+        cookie_secure: true
+    php_errors:
+        log: true

@@ -1,0 +1,102 @@
+parameters:
+    app.platform_hostname: '%env(PLATFORM_HOSTNAME)%'
+    app.tenant_db_credentials_key: '%env(TENANT_DB_CREDENTIALS_KEY)%'
+    app.tenant_db_credentials_key_id: '%env(TENANT_DB_CREDENTIALS_KEY_ID)%'
+    app.tenant_database_driver: '%env(TENANT_DATABASE_DRIVER)%'
+    app.tenant_database_host: '%env(TENANT_DATABASE_HOST)%'
+    app.tenant_database_port: '%env(int:TENANT_DATABASE_PORT)%'
+    app.tenant_database_user_host: '%env(TENANT_DATABASE_USER_HOST)%'
+    app.tenant_database_admin_url: '%env(TENANT_DATABASE_ADMIN_URL)%'
+    app.tenant_database_server_version: '%env(TENANT_DATABASE_SERVER_VERSION)%'
+    app.tenant_database_directory: '%kernel.project_dir%/var/tenant-databases'
+    env(EXPLORER_PLATFORM_DATABASE_URL): ''
+    env(EXPLORER_TENANT_DATABASE_URL): ''
+    env(MEDIA_LOCAL_DIRECTORY): '%kernel.project_dir%/var/photos'
+    env(LOG_LEVEL): error
+
+services:
+    _defaults:
+        autowire: true
+        autoconfigure: true
+
+    App\:
+        resource: '../src/'
+        exclude:
+            - '../src/Kernel.php'
+            - '../src/TenantContext/Infrastructure/Doctrine/TenantAwareConnection.php'
+            - '../src/TenantContext/Infrastructure/Messenger/TenantSwitchMiddleware.php'
+            - '../src/TenantContext/Infrastructure/Messenger/TenantStampDispatchMiddleware.php'
+
+    App\TenantContext\Infrastructure\Messenger\TenantSwitchMiddleware:
+        autoconfigure: false
+        autowire: true
+
+    App\TenantContext\Infrastructure\Messenger\TenantStampDispatchMiddleware:
+        autoconfigure: false
+        autowire: true
+
+    App\Integration\WebhookClient: '@App\Integration\StreamWebhookClient'
+
+    App\Tenant\Attendance\Infrastructure\AttendanceLedger:
+        public: true
+
+    Redis:
+        class: Redis
+        factory: ['Symfony\Component\Cache\Adapter\RedisAdapter', 'createConnection']
+        arguments:
+            - '%env(REDIS_URL)%'
+
+    Symfony\Component\HttpFoundation\Session\Storage\Handler\RedisSessionHandler:
+        arguments:
+            $redis: '@Redis'
+            $options:
+                prefix: 'platform:session:'
+                ttl: 86400
+
+    App\Diagnostics\ReadinessChecker:
+        arguments:
+            $redisUrl: '%env(REDIS_URL)%'
+            $messengerDsn: '%env(MESSENGER_TRANSPORT_DSN)%'
+
+    App\Platform\TenantRegistry\Domain\TenantDatabaseProvisioner:
+        class: App\Platform\TenantRegistry\Infrastructure\Provisioning\MysqlTenantDatabaseProvisioner
+
+    App\Hardware\Fingerprint\FingerprintReader:
+        alias: App\Hardware\Fingerprint\UnavailableFingerprintReader
+
+    App\Hardware\Camera\CameraDevice:
+        alias: App\Hardware\Camera\UnavailableCamera
+
+    App\Tenant\Attendance\FingerprintMatcher:
+        alias: App\Tenant\Attendance\Infrastructure\HardwareFingerprintMatcher
+
+    App\Media\MediaStore:
+        alias: App\Media\LocalMediaStore
+
+when@dev:
+    services:
+        App\Hardware\Fingerprint\FingerprintReader:
+            alias: App\Hardware\Fingerprint\MockFingerprintAdapter
+
+        App\Hardware\Camera\CameraDevice:
+            alias: App\Hardware\Camera\MockCameraAdapter
+
+when@test:
+    services:
+        _defaults:
+            autowire: true
+            autoconfigure: true
+
+        App\Platform\TenantRegistry\Domain\TenantDatabaseProvisioner:
+            class: App\Platform\TenantRegistry\Infrastructure\Provisioning\SqliteTenantDatabaseProvisioner
+
+        App\Hardware\Fingerprint\FingerprintReader:
+            alias: App\Hardware\Fingerprint\MockFingerprintAdapter
+
+        App\Hardware\Camera\CameraDevice:
+            alias: App\Hardware\Camera\MockCameraAdapter
+
+        App\Integration\RecordingWebhookClient:
+            public: true
+
+        App\Integration\WebhookClient: '@App\Integration\RecordingWebhookClient'

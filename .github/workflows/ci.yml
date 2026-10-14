@@ -1,0 +1,143 @@
+# Continuous integration for the attendance monorepo.
+# Backend tests use SQLite (phpunit.dist.xml). They do not connect to MySQL, Redis, or RabbitMQ.
+# Pull requests never deploy and never receive deployment secrets.
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Check out
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@bf6b4fbd49ca58e4608c9c89fba0b8d90bd2a39f # 2.35.5
+        with:
+          php-version: "8.4"
+          extensions: mbstring, intl, pdo_sqlite, sqlite3, zip, sodium
+          coverage: none
+          tools: composer:v2
+
+      - name: Cache Composer packages
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: backend/vendor
+          key: composer-${{ runner.os }}-php8.4-${{ hashFiles('backend/composer.lock') }}
+          restore-keys: |
+            composer-${{ runner.os }}-php8.4-
+
+      - name: Validate composer.json
+        run: composer validate --no-check-publish --strict
+
+      - name: Install PHP dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress --no-scripts
+
+      - name: Dump autoload
+        run: composer dump-autoload --no-interaction
+
+      - name: PHP syntax check
+        run: |
+          set -e
+          find src tests -name '*.php' -print0 | xargs -0 -n1 php -l
+
+      - name: Composer dependency advisories
+        run: composer audit --locked --no-interaction
+
+      - name: PHPUnit
+        run: php vendor/bin/phpunit
+
+      - name: Warm the test container for PHPStan
+        run: |
+          cp .env.test .env
+          php bin/console cache:warmup --env=test --no-interaction
+
+      - name: PHPStan
+        run: php vendor/bin/phpstan analyse --memory-limit=512M --no-progress
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Check out
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Vitest
+        run: npm test
+
+      - name: TypeScript project build check
+        run: npx tsc -b --pretty false
+
+      - name: Production build
+        run: npm run build
+
+      - name: npm dependency advisories
+        run: npm audit --audit-level=high
+
+  docker:
+    name: Docker
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate production Compose file
+        env:
+          # Synthetic values only for interpolation. Not deployment credentials.
+          APP_SECRET: ci-placeholder-app-secret-value-32c
+          APP_ENV: prod
+          APP_DEBUG: "0"
+          DEFAULT_URI: https://ci.example
+          PLATFORM_HOSTNAME: ci.example
+          MYSQL_ROOT_PASSWORD: ci-root-password
+          MYSQL_DATABASE: platform
+          MYSQL_USER: ci_user
+          MYSQL_PASSWORD: ci-mysql-password
+          REDIS_PASSWORD: ci-redis-password
+          RABBITMQ_USER: ci_rabbit
+          RABBITMQ_PASSWORD: ci-rabbit-password
+          TENANT_DB_CREDENTIALS_KEY: Y2ktcGxhY2Vob2xkZXItdGVuYW50LWtleS0zMmJ5dGVzIQ==
+          TENANT_DB_CREDENTIALS_KEY_ID: ci
+        run: docker compose -f docker-compose.prod.yml config --quiet
+
+      # Plain builds keep fork PRs working without actions:write cache permissions.
+      # Images are built locally on the runner and are never pushed.
+      - name: Build PHP production image
+        run: docker build -f docker/php/Dockerfile.prod -t attendance-php:ci .
+
+      - name: Build Nginx production image
+        run: docker build -f docker/nginx/Dockerfile -t attendance-nginx:ci .

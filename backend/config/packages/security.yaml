@@ -1,0 +1,72 @@
+security:
+    password_hashers:
+        Symfony\Component\Security\Core\User\PasswordAuthenticatedUserInterface: 'auto'
+
+    providers:
+        actors:
+            id: App\Identity\Infrastructure\Security\AuthenticatedActorProvider
+        device_principals:
+            memory:
+                users: {}
+
+    firewalls:
+        dev:
+            pattern: ^/(_profiler|_wdt|assets|build)/
+            security: false
+        health:
+            pattern: ^/api/v1/health
+            security: false
+        public_api:
+            pattern: ^/api/v1/public
+            security: false
+        auth_api:
+            pattern: ^/api/v1/auth
+            security: false
+        tenant_context:
+            pattern: ^/api/v1/tenant/context
+            security: false
+        platform:
+            pattern: ^/api/v1/platform
+            stateless: true
+            provider: actors
+            custom_authenticators:
+                - App\Identity\Infrastructure\Security\PlatformSessionAuthenticator
+            entry_point: App\Identity\Infrastructure\Security\ApiAuthenticationEntryPoint
+            access_denied_handler: App\Identity\Infrastructure\Security\ApiAccessDeniedHandler
+        terminal:
+            pattern: ^/api/v1/terminal
+            stateless: true
+            provider: device_principals
+            custom_authenticators:
+                - App\Platform\Device\DeviceSignatureAuthenticator
+            entry_point: App\Identity\Infrastructure\Security\ApiAuthenticationEntryPoint
+            access_denied_handler: App\Identity\Infrastructure\Security\ApiAccessDeniedHandler
+        tenant_api:
+            pattern: ^/api
+            stateless: true
+            lazy: true
+            provider: actors
+            custom_authenticators:
+                - App\Identity\Infrastructure\Security\TenantSessionAuthenticator
+            entry_point: App\Identity\Infrastructure\Security\ApiAuthenticationEntryPoint
+            access_denied_handler: App\Identity\Infrastructure\Security\ApiAccessDeniedHandler
+
+    access_control:
+        - { path: ^/api/v1/health, roles: PUBLIC_ACCESS }
+        - { path: ^/api/v1/public, roles: PUBLIC_ACCESS }
+        - { path: ^/api/v1/auth, roles: PUBLIC_ACCESS }
+        - { path: ^/api/v1/tenant/context, roles: PUBLIC_ACCESS }
+        - { path: ^/api/v1/platform/login, roles: PUBLIC_ACCESS }
+        - { path: ^/api/v1/platform/logout, roles: PUBLIC_ACCESS }
+        - { path: ^/api/v1/platform, roles: ROLE_PLATFORM_ADMIN }
+        - { path: ^/api/v1/terminal, roles: ROLE_DEVICE }
+        - { path: ^/api/v1, roles: ROLE_USER }
+
+when@test:
+    security:
+        password_hashers:
+            Symfony\Component\Security\Core\User\PasswordAuthenticatedUserInterface:
+                algorithm: auto
+                cost: 4
+                time_cost: 3
+                memory_cost: 10

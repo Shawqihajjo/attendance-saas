@@ -1,0 +1,6 @@
+# Run with:
+# php bin/console doctrine:migrations:migrate --em=tenant --configuration=config/migrations/tenant.yaml
+migrations_paths:
+    DoctrineMigrations\Tenant: migrations/tenant
+table_storage:
+    table_name: doctrine_migration_versions

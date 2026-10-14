@@ -1,0 +1,30 @@
+framework:
+    messenger:
+        failure_transport: failed
+        transports:
+            async:
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%'
+                retry_strategy:
+                    max_retries: 2
+                    delay: 0
+                    multiplier: 1
+            failed: '%env(MESSENGER_TRANSPORT_DSN)%'
+        routing:
+            App\Integration\TenantDomainEventMessage: async
+        buses:
+            messenger.bus.default:
+                middleware:
+                    - App\TenantContext\Infrastructure\Messenger\TenantSwitchMiddleware
+                    - App\TenantContext\Infrastructure\Messenger\TenantStampDispatchMiddleware
+
+when@test:
+    framework:
+        messenger:
+            transports:
+                async:
+                    dsn: 'in-memory://'
+                    retry_strategy:
+                        max_retries: 2
+                        delay: 0
+                        multiplier: 1
+                failed: 'in-memory://'

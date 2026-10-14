@@ -1,0 +1,23 @@
+framework:
+    messenger:
+        transports:
+            async:
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%'
+                options:
+                    exchange:
+                        name: attendance
+                        type: direct
+                    queues:
+                        attendance:
+                            binding_keys:
+                                - attendance
+            failed:
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%'
+                options:
+                    exchange:
+                        name: attendance_failed
+                        type: direct
+                    queues:
+                        attendance_failed:
+                            binding_keys:
+                                - attendance_failed

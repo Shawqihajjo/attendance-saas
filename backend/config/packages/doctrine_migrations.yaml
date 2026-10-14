@@ -1,0 +1,5 @@
+doctrine_migrations:
+    migrations_paths:
+        DoctrineMigrations\Platform: '%kernel.project_dir%/migrations/platform'
+    connection: platform
+    enable_profiler: false
