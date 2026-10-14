@@ -23,4 +23,5 @@ final class ExplorerUnavailableException extends ServiceUnavailableHttpException
     {
         return 'Database explorer unavailable';
     }
+    
 }

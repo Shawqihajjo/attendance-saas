@@ -18,4 +18,5 @@ final class PreparedExplorerQuery
         public readonly ?string $column = null,
     ) {
     }
+    
 }
