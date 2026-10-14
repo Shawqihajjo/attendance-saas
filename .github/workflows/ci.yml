@@ -62,13 +62,15 @@ jobs:
       - name: Composer dependency advisories
         run: composer audit --locked --no-interaction
 
+      # Symfony Dotenv bootEnv requires .env; CI has only the committed .env.test.
+      - name: Prepare test environment file
+        run: cp .env.test .env
+
       - name: PHPUnit
         run: php vendor/bin/phpunit
 
       - name: Warm the test container for PHPStan
-        run: |
-          cp .env.test .env
-          php bin/console cache:warmup --env=test --no-interaction
+        run: php bin/console cache:warmup --env=test --no-interaction
 
       - name: PHPStan
         run: php vendor/bin/phpstan analyse --memory-limit=512M --no-progress
